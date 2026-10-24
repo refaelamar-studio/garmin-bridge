@@ -70,6 +70,186 @@ def format_duration(duration_sec):
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
 
+def build_garmin_running_workout(workout_name, description="", distance_km=0, duration_minutes=0, steps=None):
+    sport_type = {
+        "sportTypeId": 1,
+        "sportTypeKey": "running",
+        "displayOrder": 1
+    }
+    
+    workout_steps = []
+    
+    # If custom steps provided
+    if steps and isinstance(steps, list) and len(steps) > 0:
+        for idx, step in enumerate(steps, start=1):
+            stype = str(step.get("type", "interval")).lower()
+            if stype == "warmup":
+                step_type_id, step_key = 1, "warmup"
+            elif stype == "cooldown":
+                step_type_id, step_key = 2, "cooldown"
+            elif stype == "recovery":
+                step_type_id, step_key = 4, "recovery"
+            elif stype == "rest":
+                step_type_id, step_key = 5, "rest"
+            else:
+                step_type_id, step_key = 3, "interval"
+                
+            dist_m = float(step.get("distanceMeters", 0) or 0)
+            dur_s = float(step.get("durationSeconds", 0) or 0)
+            
+            if dist_m > 0:
+                end_cond = {
+                    "conditionTypeId": 3,
+                    "conditionTypeKey": "distance",
+                    "displayOrder": 3,
+                    "displayable": True
+                }
+                end_val = dist_m
+            elif dur_s > 0:
+                end_cond = {
+                    "conditionTypeId": 2,
+                    "conditionTypeKey": "time",
+                    "displayOrder": 2,
+                    "displayable": True
+                }
+                end_val = dur_s
+            else:
+                end_cond = {
+                    "conditionTypeId": 1,
+                    "conditionTypeKey": "lap.button",
+                    "displayOrder": 1,
+                    "displayable": True
+                }
+                end_val = None
+                
+            step_dict = {
+                "type": "ExecutableStepDTO",
+                "stepOrder": idx,
+                "stepType": {
+                    "stepTypeId": step_type_id,
+                    "stepTypeKey": step_key,
+                    "displayOrder": step_type_id
+                },
+                "endCondition": end_cond,
+                "targetType": {
+                    "workoutTargetTypeId": 1,
+                    "workoutTargetTypeKey": "no.target",
+                    "displayOrder": 1
+                }
+            }
+            if end_val is not None:
+                step_dict["endConditionValue"] = end_val
+            workout_steps.append(step_dict)
+    else:
+        # Default 3-step structured workout: Warmup -> Main Run -> Cooldown
+        dist_m = float(distance_km or 0) * 1000.0
+        dur_s = float(duration_minutes or 0) * 60.0
+        
+        # Step 1: Warmup (ended by lap button or 5 min)
+        workout_steps.append({
+            "type": "ExecutableStepDTO",
+            "stepOrder": 1,
+            "stepType": {
+                "stepTypeId": 1,
+                "stepTypeKey": "warmup",
+                "displayOrder": 1
+            },
+            "endCondition": {
+                "conditionTypeId": 1,
+                "conditionTypeKey": "lap.button",
+                "displayOrder": 1,
+                "displayable": True
+            },
+            "targetType": {
+                "workoutTargetTypeId": 1,
+                "workoutTargetTypeKey": "no.target",
+                "displayOrder": 1
+            }
+        })
+        
+        # Step 2: Main Run (distance in meters, or duration, or lap button)
+        if dist_m > 0:
+            main_cond = {
+                "conditionTypeId": 3,
+                "conditionTypeKey": "distance",
+                "displayOrder": 3,
+                "displayable": True
+            }
+            main_val = dist_m
+        elif dur_s > 0:
+            main_cond = {
+                "conditionTypeId": 2,
+                "conditionTypeKey": "time",
+                "displayOrder": 2,
+                "displayable": True
+            }
+            main_val = dur_s
+        else:
+            main_cond = {
+                "conditionTypeId": 1,
+                "conditionTypeKey": "lap.button",
+                "displayOrder": 1,
+                "displayable": True
+            }
+            main_val = None
+            
+        main_step = {
+            "type": "ExecutableStepDTO",
+            "stepOrder": 2,
+            "stepType": {
+                "stepTypeId": 3,
+                "stepTypeKey": "interval",
+                "displayOrder": 3
+            },
+            "endCondition": main_cond,
+            "targetType": {
+                "workoutTargetTypeId": 1,
+                "workoutTargetTypeKey": "no.target",
+                "displayOrder": 1
+            }
+        }
+        if main_val is not None:
+            main_step["endConditionValue"] = main_val
+        workout_steps.append(main_step)
+        
+        # Step 3: Cooldown (ended by lap button)
+        workout_steps.append({
+            "type": "ExecutableStepDTO",
+            "stepOrder": 3,
+            "stepType": {
+                "stepTypeId": 2,
+                "stepTypeKey": "cooldown",
+                "displayOrder": 2
+            },
+            "endCondition": {
+                "conditionTypeId": 1,
+                "conditionTypeKey": "lap.button",
+                "displayOrder": 1,
+                "displayable": True
+            },
+            "targetType": {
+                "workoutTargetTypeId": 1,
+                "workoutTargetTypeKey": "no.target",
+                "displayOrder": 1
+            }
+        })
+
+    estimated_sec = int(float(distance_km) * 360) if distance_km else (int(duration_minutes * 60) if duration_minutes else 1800)
+    
+    return {
+        "workoutName": workout_name or "אימון ריצה",
+        "description": description or "",
+        "sportType": sport_type,
+        "estimatedDurationInSecs": estimated_sec,
+        "workoutSegments": [
+            {
+                "segmentOrder": 1,
+                "sportType": sport_type,
+                "workoutSteps": workout_steps
+            }
+        ]
+    }
+
 try:
     from curl_cffi import requests as cffi_requests
     HAS_CFFI = True
@@ -124,9 +304,7 @@ def fetch_public_garmin_splits(activity_id):
     return None
 
 class GarminHTTPHandler(BaseHTTPRequestHandler):
-    # Disable default connection logging noise
     def log_message(self, format, *args):
-        # Only log non-200 or interesting messages
         if len(args) > 1 and str(args[1]) not in ("200", "204"):
             logger.info(f"{self.address_string()} - {format % args}")
 
@@ -188,6 +366,8 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
                 self.handle_activities(body)
             elif self.path == "/activity_details":
                 self.handle_activity_details(body)
+            elif self.path == "/schedule_workout":
+                self.handle_schedule_workout(body)
             elif self.path == "/refresh":
                 self.handle_refresh(body)
             else:
@@ -205,7 +385,6 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
 
         garmin = Garmin(email=email or None, password=password or None, return_on_mfa=True)
 
-        # 1. Try tokenstore login if tokens exist
         if tokens:
             try:
                 tokens_str = parse_tokens_str(tokens)
@@ -237,7 +416,6 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "נא להזין כתובת אימייל וסיסמה של Garmin, או להזין טוקן התחברות ישיר."})
             return
 
-        # 2. Login with credentials
         try:
             mfa_status, _ = garmin.login()
             is_mfa = (
@@ -261,7 +439,6 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
                 })
                 return
 
-            # Clean successful login
             dumped_tokens = garmin.client.dumps()
             profile_name = garmin.display_name or garmin.full_name or email
             logger.info(f"Garmin login succeeded for {email}")
@@ -298,20 +475,20 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
             return
 
         with mfa_lock:
-            session_data = mfa_sessions.get(session_id)
-            if session_data:
-                mfa_sessions.pop(session_id, None)
+            session_data = mfa_sessions.pop(session_id, None)
 
         if not session_data:
-            self._send_json(400, {"error": "פג תוקף סשן האימות (10 דקות). אנא נסה להתחבר שוב."})
+            self._send_json(400, {"error": "פג תוקפו של סשן האימות הדו-שלבי (עברו יותר מ-10 דקות). אנא נסה להתחבר שוב מחדש."})
             return
 
         garmin = session_data["garmin"]
+        email = session_data.get("email", "")
+
         try:
-            garmin.client.resume_login(None, mfa_code)
+            garmin.resume_login(mfa_code)
             dumped_tokens = garmin.client.dumps()
-            profile_name = garmin.display_name or garmin.full_name or session_data.get("email", "")
-            logger.info(f"MFA successfully completed for session {session_id}")
+            profile_name = garmin.display_name or garmin.full_name or email
+            logger.info(f"Garmin MFA login succeeded for {email}")
             self._send_json(200, {
                 "status": "SUCCESS",
                 "tokens": dumped_tokens,
@@ -321,75 +498,64 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
                 }
             })
         except GarminConnectAuthenticationError as e:
-            logger.error(f"Garmin MFA verification error: {e}")
-            self._send_json(401, {"error": "קוד האימות שהוזן שגוי או פג תוקפו."})
+            logger.error(f"Garmin MFA auth error for {email}: {e}")
+            self._send_json(401, {"error": "קוד האימות הדו-שלבי שהוזן שגוי או שפג תוקפו."})
         except Exception as e:
-            logger.error(f"Garmin MFA error: {e}")
-            self._send_json(500, {"error": f"שגיאה באימות קוד ה-MFA: {str(e)}"})
+            logger.error(f"Garmin MFA resume failed: {e}")
+            self._send_json(500, {"error": f"שגיאה באימות קוד ה-MFA מול Garmin: {str(e)}"})
 
     def handle_activities(self, body):
         tokens = body.get("tokens", "")
-        start_date = body.get("startDate", "")
-        end_date = body.get("endDate", "")
-        activity_type = body.get("activityType", None)
-
         if not tokens:
             self._send_json(400, {"error": "tokens are required"})
             return
 
         tokens_str = parse_tokens_str(tokens)
-
-        if not start_date:
-            now = time.strftime("%Y-%m-%d")
-            start_date = now
-
         garmin = Garmin()
         try:
             garmin.client.loads(tokens_str)
             with garmin.client._token_lock:
                 if garmin.client.di_refresh_token and garmin.client._token_expires_soon():
                     garmin.client._refresh_session()
+        except Exception as e:
+            self._send_json(401, {"error": f"טוקן Garmin אינו תקין: {str(e)}", "code": "INVALID_TOKEN"})
+            return
 
-            # Fetch activities (fast single-call fetch of the latest 40 activities)
-            raw_activities = []
-            try:
-                raw_activities = garmin.get_activities(0, limit=40) or []
-            except Exception as e:
-                logger.warning(f"garmin.get_activities(0, 40) failed ({e}), falling back to date query...")
-                try:
-                    raw_activities = garmin.get_activities_by_date(
-                        startdate=start_date,
-                        enddate=end_date or None,
-                        activitytype=activity_type,
-                        sortorder="desc"
-                    ) or []
-                except Exception as date_err:
-                    logger.warning(f"get_activities_by_date also failed: {date_err}")
-                    raw_activities = []
+        try:
+            raw_activities = garmin.get_activities(0, 50) or []
+            start_date = body.get("startDate", "").split("T")[0] if body.get("startDate") else None
+            end_date = body.get("endDate", "").split("T")[0] if body.get("endDate") else None
 
             activities = []
-            for act in (raw_activities or []):
-                act_id = str(act.get("activityId", ""))
-                distance_m = float(act.get("distance", 0.0) or 0.0)
-                duration_s = float(act.get("duration", 0.0) or 0.0)
-                avg_speed = float(act.get("averageSpeed", 0.0) or 0.0)
-                start_local = act.get("startTimeLocal", "")
-                date_str = start_local[:10] if start_local else ""
-                act_type_info = act.get("activityType", {}) or {}
-                type_key = act_type_info.get("typeKey", "running")
+            for act in raw_activities:
+                if not act:
+                    continue
+                start_time_local = act.get("startTimeLocal") or ""
+                act_date = start_time_local.split(" ")[0] if start_time_local else ""
+                if not act_date and act.get("startTimeGMT"):
+                    act_date = act.get("startTimeGMT", "").split("T")[0]
+
+                if start_date and act_date and act_date < start_date:
+                    continue
+                if end_date and act_date and act_date > end_date:
+                    continue
+
+                dist_m = act.get("distance", 0) or 0
+                dist_km = round(dist_m / 1000.0, 2)
+                duration_s = act.get("duration", 0) or 0
+                avg_speed = act.get("averageSpeed", 0) or 0
+                max_speed = act.get("maxSpeed", 0) or 0
 
                 activities.append({
-                    "id": act_id,
-                    "activityId": act_id,
-                    "activityName": act.get("activityName", "אימון"),
-                    "activityType": type_key,
-                    "date": date_str,
-                    "startTime": start_local,
-                    "distanceKm": round(distance_m / 1000.0, 2),
-                    "durationSeconds": int(round(duration_s)),
+                    "activityId": str(act.get("activityId", "")),
+                    "activityName": act.get("activityName") or "אימון ריצה",
+                    "date": act_date,
+                    "startTime": start_time_local or act.get("startTimeGMT") or "",
+                    "activityType": act.get("activityType", {}).get("typeKey", "running"),
+                    "distanceKm": dist_km,
                     "durationFormatted": format_duration(duration_s),
                     "avgPace": format_pace(avg_speed),
-                    "maxPace": format_pace(float(act.get("maxSpeed", 0.0) or 0.0)),
+                    "maxPace": format_pace(max_speed),
                     "avgHeartRate": act.get("averageHR"),
                     "maxHeartRate": act.get("maxHR"),
                     "calories": act.get("calories"),
@@ -398,7 +564,7 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
                     "avgCadence": act.get("averageRunningCadenceInStepsPerMinute") or act.get("averageCadence"),
                     "aerobicTrainingEffect": act.get("aerobicTrainingEffect"),
                     "anaerobicTrainingEffect": act.get("anaerobicTrainingEffect"),
-                    "activityUrl": f"https://connect.garmin.com/modern/activity/{act_id}",
+                    "activityUrl": f"https://connect.garmin.com/modern/activity/{act.get('activityId')}",
                 })
 
             dumped_tokens = garmin.client.dumps()
@@ -408,94 +574,81 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
                 "activities": activities,
                 "tokens": dumped_tokens,
             })
-        except GarminConnectAuthenticationError:
-            self._send_json(401, {"error": "חיבור ה-Garmin פג תוקף, יש להתחבר מחדש.", "code": "AUTH_EXPIRED"})
         except Exception as e:
-            logger.warning(f"Error fetching Garmin activities: {e}")
-            self._send_json(500, {"error": f"שגיאה בשליפת אימונים מ-Garmin: {str(e)}"})
+            logger.error(f"Failed to fetch activities: {e}", exc_info=True)
+            self._send_json(500, {"error": f"שגיאה בשליפת פעילויות מ-Garmin: {str(e)}"})
 
     def handle_activity_details(self, body):
-        tokens = body.get("tokens", "")
         activity_id = str(body.get("activityId", "")).strip()
-
+        tokens = body.get("tokens", "")
         if not activity_id:
             self._send_json(400, {"error": "activityId is required"})
             return
 
-        tokens_str = parse_tokens_str(tokens)
-        garmin = Garmin(retry_attempts=0)
         raw_act = None
         splits_data = None
-        raw_zones = None
-        raw_weather = None
-        dumped_tokens = tokens_str
+        weather_data = None
+        hr_zones_data = None
+        garmin = Garmin()
+        dumped_tokens = None
 
-        # 1. Try authenticated Garmin client if tokens are available
-        if tokens_str:
+        if tokens:
             try:
+                tokens_str = parse_tokens_str(tokens)
                 garmin.client.loads(tokens_str)
                 with garmin.client._token_lock:
                     if garmin.client.di_refresh_token and garmin.client._token_expires_soon():
                         garmin.client._refresh_session()
-
-                raw_act = garmin.get_activity(activity_id) or {}
+                raw_act = garmin.get_activity(activity_id)
                 dumped_tokens = garmin.client.dumps()
-
                 try:
-                    splits_data = garmin.get_activity_splits(activity_id) or {}
-                except Exception:
-                    pass
-
+                    splits_data = garmin.get_activity_splits(activity_id)
+                except Exception as se:
+                    logger.debug(f"Splits fetch failed: {se}")
                 try:
-                    raw_zones = garmin.get_activity_hr_in_timezones(activity_id) or []
-                except Exception:
-                    pass
-
+                    weather_data = garmin.get_activity_weather(activity_id)
+                except Exception as we:
+                    logger.debug(f"Weather fetch failed: {we}")
                 try:
-                    raw_weather = garmin.get_activity_weather(activity_id) or {}
-                except Exception:
-                    pass
-
-            except GarminConnectAuthenticationError:
-                logger.info(f"Garmin token expired for activity {activity_id}, trying public fallback...")
+                    hr_zones_data = garmin.get_activity_hr_in_timezones(activity_id)
+                except Exception as he:
+                    logger.debug(f"HR Zones fetch failed: {he}")
             except Exception as e:
-                logger.warning(f"Authenticated activity fetch failed: {e}")
+                logger.warning(f"Authenticated activity details failed: {e}")
 
-        # 2. Public fallback if authenticated fetch didn't return activity data
         if not raw_act:
-            logger.info(f"Attempting public activity fetch for activity {activity_id}...")
             raw_act = fetch_public_garmin_activity(activity_id)
             if raw_act:
                 splits_data = fetch_public_garmin_splits(activity_id)
 
         if not raw_act:
             self._send_json(404, {
-                "error": "לא ניתן היה לשלוף את פרטי הפעילות מ-Garmin. יש לוודא שהאימון קיים ונגיש בחשבון Garmin.",
+                "error": "לא ניתן היה לשלוף את פרטי הפעילות מ-Garmin. ודא שהאימון קיים ונגיש בחשבון.",
                 "code": "ACTIVITY_NOT_FOUND"
             })
             return
 
-        summary = raw_act.get("summaryDTO", {}) or {}
-        distance_m = float(summary.get("distance", 0.0) or 0.0)
-        duration_s = float(summary.get("duration", 0.0) or 0.0)
-        moving_duration_s = float(summary.get("movingDuration", duration_s) or duration_s)
-        elapsed_duration_s = float(summary.get("elapsedDuration", duration_s) or duration_s)
-        avg_speed = float(summary.get("averageSpeed", 0.0) or 0.0)
-        max_speed = float(summary.get("maxSpeed", 0.0) or 0.0)
+        summary = raw_act.get("summaryDTO") or raw_act
+        dist_m = float(summary.get("distance", 0) or 0)
+        dist_km = round(dist_m / 1000.0, 2)
+        duration_s = float(summary.get("duration", 0) or 0)
+        moving_duration_s = float(summary.get("movingDuration", 0) or duration_s)
+        elapsed_duration_s = float(summary.get("elapsedDuration", 0) or duration_s)
+        avg_speed = float(summary.get("averageSpeed", 0) or 0)
+        max_speed = float(summary.get("maxSpeed", 0) or 0)
 
-        # Laps / Splits
         laps = []
         if splits_data:
-            lap_list = splits_data.get("lapDTOs") or splits_data.get("splitSummaries") or []
-            for idx, lap in enumerate(lap_list):
-                l_dist = float(lap.get("distance", 0.0) or 0.0)
-                l_dur = float(lap.get("duration", 0.0) or 0.0)
-                l_speed = float(lap.get("averageSpeed", 0.0) or 0.0)
+            lap_dtos = splits_data.get("lapDTOs") or splits_data.get("splitSummaries") or []
+            for idx, lap in enumerate(lap_dtos, start=1):
+                l_dist = float(lap.get("distance", 0) or 0)
+                l_dur = float(lap.get("duration", 0) or 0)
+                l_spd = float(lap.get("averageSpeed", 0) or 0)
                 laps.append({
-                    "lapIndex": idx + 1,
+                    "lapIndex": idx,
                     "distanceKm": round(l_dist / 1000.0, 2),
                     "durationFormatted": format_duration(l_dur),
-                    "avgPace": format_pace(l_speed),
+                    "avgPace": format_pace(l_spd),
                     "avgHeartRate": lap.get("averageHR"),
                     "maxHeartRate": lap.get("maxHR"),
                     "elevationGain": lap.get("elevationGain"),
@@ -503,49 +656,39 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
                     "calories": lap.get("calories"),
                 })
 
-        # Heart Rate Zones
         hr_zones = []
-        if raw_zones:
-            zone_names = {
-                1: "חימום / התאוששות (Zone 1)",
-                2: "אירובי קל (Zone 2)",
-                3: "אירובי (Zone 3)",
-                4: "סף אנאירובי (Zone 4)",
-                5: "מקסימום (Zone 5)"
-            }
-            total_zone_secs = sum(float(z.get("secsInZone", 0.0) or 0.0) for z in raw_zones) or 1.0
-            for z in raw_zones:
-                z_num = int(z.get("zoneNumber", 0) or 0)
-                if z_num <= 0:
-                    continue
-                z_secs = float(z.get("secsInZone", 0.0) or 0.0)
-                pct = round((z_secs / total_zone_secs) * 100, 1)
+        if hr_zones_data and isinstance(hr_zones_data, list):
+            for z in hr_zones_data:
                 hr_zones.append({
-                    "zoneNumber": z_num,
-                    "zoneName": zone_names.get(z_num, f"Zone {z_num}"),
-                    "secsInZone": int(round(z_secs)),
-                    "percentInZone": pct,
+                    "zoneNumber": z.get("zoneNumber", 0),
+                    "zoneName": z.get("zoneName", ""),
+                    "secsInZone": z.get("secsInZone", 0),
+                    "percentInZone": round(float(z.get("zonePercentage", 0) or 0), 1),
                     "minHr": z.get("zoneLowBoundary"),
-                    "maxHr": z.get("zoneHighBoundary") or None,
+                    "maxHr": z.get("zoneHighBoundary"),
                 })
 
-        # Weather
         weather_info = None
-        if raw_weather:
+        if weather_data and isinstance(weather_data, dict):
             weather_info = {
-                "temp": raw_weather.get("temp"),
-                "feelsLike": raw_weather.get("apparentTemp"),
-                "humidity": raw_weather.get("relativeHumidity"),
-                "condition": raw_weather.get("weatherTypeDTO", {}).get("desc", ""),
-                "windSpeedKmh": raw_weather.get("windSpeed"),
+                "temp": weather_data.get("temperature"),
+                "feelsLike": weather_data.get("apparentTemperature"),
+                "humidity": weather_data.get("relativeHumidity"),
+                "condition": weather_data.get("weatherTypeDTO", {}).get("weatherTypeDescription"),
+                "windSpeedKmh": round(float(weather_data.get("windSpeed", 0) or 0) * 3.6, 1) if weather_data.get("windSpeed") else None,
             }
+
+        start_time_local = summary.get("startTimeLocal") or summary.get("startTimeGMT") or ""
+        date_part = start_time_local.split(" ")[0] if start_time_local else ""
+        if not date_part and summary.get("startTimeGMT"):
+            date_part = summary.get("startTimeGMT", "").split("T")[0]
 
         detail = {
             "id": activity_id,
-            "activityName": raw_act.get("activityName", "אימון Garmin"),
-            "date": (raw_act.get("startTimeLocal") or "")[:10],
-            "startTime": raw_act.get("startTimeLocal", ""),
-            "distanceKm": round(distance_m / 1000.0, 2),
+            "activityName": raw_act.get("activityName") or summary.get("activityName") or "אימון ריצה",
+            "date": date_part,
+            "startTime": start_time_local,
+            "distanceKm": dist_km,
             "durationFormatted": format_duration(duration_s),
             "movingDurationFormatted": format_duration(moving_duration_s),
             "elapsedDurationFormatted": format_duration(elapsed_duration_s),
@@ -582,6 +725,90 @@ class GarminHTTPHandler(BaseHTTPRequestHandler):
             "activity": detail,
             "tokens": dumped_tokens,
         })
+
+    def handle_schedule_workout(self, body):
+        tokens = body.get("tokens", "")
+        if not tokens:
+            self._send_json(400, {"error": "טוקן חיבור של Garmin נדרש"})
+            return
+
+        date_str = str(body.get("date", "")).strip()
+        if not date_str:
+            self._send_json(400, {"error": "תאריך האימון (date) נדרש בפורמט YYYY-MM-DD"})
+            return
+
+        workout_name = body.get("workoutName") or body.get("title") or "אימון ריצה"
+        description = body.get("description") or body.get("coachDescription") or ""
+        try:
+            distance_km = float(body.get("distanceKm") or body.get("plannedDistance") or 0)
+        except (ValueError, TypeError):
+            distance_km = 0.0
+
+        try:
+            duration_minutes = float(body.get("durationMinutes") or 0)
+        except (ValueError, TypeError):
+            duration_minutes = 0.0
+
+        steps = body.get("steps") or []
+        push_to_device = body.get("pushToDevice", True)
+
+        tokens_str = parse_tokens_str(tokens)
+        garmin = Garmin()
+        try:
+            garmin.client.loads(tokens_str)
+            with garmin.client._token_lock:
+                if garmin.client.di_refresh_token and garmin.client._token_expires_soon():
+                    garmin.client._refresh_session()
+        except Exception as e:
+            self._send_json(401, {"error": f"טוקן Garmin אינו תקין: {str(e)}", "code": "INVALID_TOKEN"})
+            return
+
+        try:
+            workout_payload = build_garmin_running_workout(
+                workout_name=workout_name,
+                description=description,
+                distance_km=distance_km,
+                duration_minutes=duration_minutes,
+                steps=steps
+            )
+
+            upload_res = garmin.upload_workout(workout_payload)
+            workout_id = upload_res.get("workoutId")
+            if not workout_id:
+                raise ValueError(f"Garmin did not return a workoutId: {upload_res}")
+
+            logger.info(f"Successfully uploaded workout {workout_id}: '{workout_name}'")
+
+            scheduled_date = None
+            try:
+                garmin.schedule_workout(workout_id, date_str)
+                scheduled_date = date_str
+                logger.info(f"Successfully scheduled workout {workout_id} on {date_str}")
+            except Exception as se:
+                logger.warning(f"Could not schedule workout on calendar: {se}")
+
+            pushed_to_device = False
+            if push_to_device:
+                try:
+                    garmin.push_workout_to_device(workout_id)
+                    pushed_to_device = True
+                    logger.info(f"Successfully pushed workout {workout_id} to device queue")
+                except Exception as pe:
+                    logger.info(f"Push to device skipped or device not found: {pe}")
+
+            dumped_tokens = garmin.client.dumps()
+            self._send_json(200, {
+                "status": "SUCCESS",
+                "workoutId": workout_id,
+                "workoutName": workout_name,
+                "scheduledDate": scheduled_date or date_str,
+                "pushedToDevice": pushed_to_device,
+                "tokens": dumped_tokens,
+                "message": f"האימון '{workout_name}' נשלח בהצלחה לחשבון ה-Garmin ולשעון של המתאמן לתאריך {date_str}!"
+            })
+        except Exception as e:
+            logger.error(f"Failed to schedule workout: {e}", exc_info=True)
+            self._send_json(500, {"error": f"שגיאה בהעלאת האימון ל-Garmin: {str(e)}"})
 
     def handle_refresh(self, body):
         tokens = body.get("tokens", "")
